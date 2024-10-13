@@ -2,10 +2,8 @@ server:
   uri: "ws://talk.deepwiser.com:8999/ws"
   login_url: "http://47.99.146.156:8889/user/v2/login"
   salt_url: "http://47.99.146.156:8889/user/v2/login/code/"
-
-user:
-  username: "<your username (phone number)>"
-  password: "<your password>"
+  homes_url: "http://47.99.146.156:8889/home/v2/homes"
+  device_info_url_base: "http://47.99.146.156:8889/home/v2/homes/"
 
 constants:
   password_salt: "ZT0G7EwHzgaQMzEJ"
@@ -13,7 +11,11 @@ constants:
     Content-Type: "application/json; charset=utf-8"
     Host: "47.99.146.156:8889"
     Connection: "Keep-Alive"
-    User-Agent: "okhttp/3.8.0"
+    User-Agent: "Mozilla/5.0 (Linux; Android 15; sdk_gphone64_arm64 Build/AE3A.240806.005; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/124.0.6367.219 Mobile Safari/537.36"
+    X-Requested-With: "com.dolen.deepsmart"
+    Accept: "application/json, text/plain, */*"
+    Accept-Encoding: "gzip, deflate"
+    Accept-Language: "en-US,en;q=0.9"
 
 message:
   start_byte: 0x02
@@ -22,11 +24,6 @@ message:
   end_byte: 0x03
 
 command:
-  chat_id: "0001d81e0ec0d183"
-  to_cust_id: "000200000c2a3561"
-  addr: 0x1011
   data_type: 0x00
-  data: 1
   afn: 0x01
   time_wait: 1
-

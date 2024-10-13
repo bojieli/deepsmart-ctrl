@@ -4,23 +4,32 @@ import struct
 import requests
 import hashlib
 import yaml
+import argparse
+import sys
 
 class NetbeatService:
-    def __init__(self, config):
+    def __init__(self, config, secrets):
         self.ws = None
         self.cust_id = None
         self.login_auth = None
         self.msg_no = 1
         self.config = config
+        self.secrets = secrets
+        self.session = requests.Session()
+        self.deepwiser_cookie = None
+        self.chat_id = None
 
     def connect(self):
         self.ws = websocket.create_connection(self.config['server']['uri'])
 
     def login(self):
         # Step 1: Get salt and sid
-        url = self.config['server']['salt_url'] + self.config['user']['username'] + "/"
+        url = self.config['server']['salt_url'] + self.secrets['user']['username'] + "/"
         headers = self.config['constants']['headers']
         response = requests.post(url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get salt and sid. Status code: {response.status_code}")
+        
         # Log the response
         print("Salt and SID response:")
         print(json.dumps(response.json(), indent=2))
@@ -37,16 +46,25 @@ class NetbeatService:
         def md5(s):
             return hashlib.md5(s.encode()).hexdigest()
         
-        password_hash = sha256(sha256(md5(self.config['user']['password'] + self.config['constants']['password_salt']) + salt) + code)
+        password_hash = sha256(sha256(md5(self.secrets['user']['password'] + self.config['constants']['password_salt']) + salt) + code)
 
         # Step 3: Login
         login_url = self.config['server']['login_url']
         login_payload = {
-            "username": self.config['user']['username'],
+            "username": self.secrets['user']['username'],
             "sid": sid,
             "password": password_hash
         }
         login_response = requests.post(login_url, headers=headers, json=login_payload)
+        if login_response.status_code != 200:
+            raise Exception(f"Failed to login. Status code: {login_response.status_code}")
+
+        # Extract DEEPWISER_COOKIE from Set-Cookie header
+        set_cookie_header = login_response.headers.get('Set-Cookie')
+        if set_cookie_header:
+            self.deepwiser_cookie = set_cookie_header.split(';')[0].split('=')[1]
+        else:
+            raise Exception("DEEPWISER_COOKIE not found in login response")
 
         # Log login response
         print("Login response:")
@@ -78,7 +96,7 @@ class NetbeatService:
         
         checksum = self.calc_checksum(body)
         body += checksum + bytes([self.config['message']['end_byte']])
-        
+
         msg_length = len(body)
         header = struct.pack('>BHB', start, msg_length, version)
         
@@ -96,7 +114,7 @@ class NetbeatService:
 
     def send_cmd(self, cmd):
         binary_cmd = self.build_send_cmd(cmd)
-        message = self.construct_send_message(binary_cmd, cmd['chat_id'], cmd['to_cust_id'])
+        message = self.construct_send_message(binary_cmd, self.chat_id, cmd['to_cust_id'])
         self.ws.send(message)
         
         # Log hex dump of sent message
@@ -260,17 +278,114 @@ class NetbeatService:
             hex_dump = ' '.join(f'{byte:02x}' for byte in chunk)
             print(f'{i:04x}: {hex_dump:<48}')
 
-def send_command(config):
-    netbeat = NetbeatService(config)
+    def get_home_info(self):
+        url = f"{self.config['server']['homes_url']}?DEEPWISER_COOKIE={self.deepwiser_cookie}"
+        headers = self.config['constants']['headers']
+        response = self.session.get(url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get homes info. Status code: {response.status_code}")
+        
+        data = response.json()['data']
+        if not data:
+            raise Exception("No homes found in the response")
+        
+        home_info = data[0]
+        self.chat_id = home_info['groupIdStr']
+        return home_info['homeId']
+
+    def get_device_info(self):
+        home_id = self.get_home_info()
+        url = f"{self.config['server']['device_info_url_base']}{home_id}?DEEPWISER_COOKIE={self.deepwiser_cookie}"
+        headers = self.config['constants']['headers']
+        response = self.session.get(url, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get device info. Status code: {response.status_code}")
+        
+        if 'data' not in response.json():
+            raise Exception("Invalid response format: 'data' key not found in JSON response")
+        return response.json()['data']
+
+    def parse_device_info(self, device_info):
+        device_map = {}
+        for catalog in device_info['catalogs']:
+            for element in catalog['elements']:
+                if isinstance(element, dict) and 'elements' in element:
+                    for device in element['elements']:
+                        name = device['name']
+                        addr = device['addrs'][0]['addr']
+                        to_cust_id = device['wiserIndexCodeStr']
+                        knx_info = device['knxInfo']
+                        if 'onvalue' in knx_info and 'offvalue' in knx_info:
+                            device_map[name] = {
+                                'addr': addr,
+                                'to_cust_id': to_cust_id,
+                                'on_value': knx_info['onvalue'],
+                                'off_value': knx_info['offvalue']
+                            }
+        return device_map
+
+    def get_all_device_names(self):
+        device_info = self.get_device_info()
+        device_map = self.parse_device_info(device_info)
+        return list(device_map.keys())
+
+def print_help_and_devices(config, secrets):
+    netbeat = NetbeatService(config, secrets)
     netbeat.connect()
     netbeat.login()
-    
-    cmd = config['command']
+
+    device_names = netbeat.get_all_device_names()
+
+    print("Usage: python deepsmart-ctrl.py <device_name> <action>")
+    print("\nAvailable devices:")
+    for name in device_names:
+        print(f"  - {name}")
+    print("\nActions:")
+    print("  - on")
+    print("  - off")
+    print("\nExample: python deepsmart-ctrl.py '玄关筒灯' on")
+
+def send_command(config, secrets, device_name, action):
+    netbeat = NetbeatService(config, secrets)
+    netbeat.connect()
+    netbeat.login()
+
+    device_info = netbeat.get_device_info()
+    device_map = netbeat.parse_device_info(device_info)
+
+    if device_name not in device_map:
+        print(f"Error: Device '{device_name}' not found.")
+        print("\nAvailable devices:")
+        for name in device_map.keys():
+            print(f"  - {name}")
+        return
+
+    device = device_map[device_name]
+    cmd = config['command'].copy()
+    cmd['addr'] = device['addr']
+    cmd['to_cust_id'] = device['to_cust_id']
+    cmd['data'] = int(device['on_value']) if action == 'on' else int(device['off_value'])
+
     result = netbeat.send_cmd(cmd)
-    print(f"Command result: {result}")
+    print(f"Command result for {device_name} ({action}): {result}")
 
 if __name__ == "__main__":
     with open('config.yaml', 'r') as file:
         config = yaml.safe_load(file)
     
-    send_command(config)
+    with open('secrets.yaml', 'r') as file:
+        secrets = yaml.safe_load(file)
+
+    parser = argparse.ArgumentParser(description="Control DeepSmart devices", add_help=False)
+    parser.add_argument("device_name", nargs="?", help="Name of the device to control")
+    parser.add_argument("action", nargs="?", choices=['on', 'off'], help="Action to perform")
+
+    if len(sys.argv) == 1 or len(sys.argv) > 3:
+        print_help_and_devices(config, secrets)
+    else:
+        args = parser.parse_args()
+        if args.device_name and args.action:
+            send_command(config, secrets, args.device_name, args.action)
+        else:
+            print("Error: Incorrect arguments.")
+            print_help_and_devices(config, secrets)
